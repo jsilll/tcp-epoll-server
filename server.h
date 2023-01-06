@@ -60,35 +60,39 @@ namespace tcp {
         [[nodiscard]] constexpr auto kind() const noexcept { return _kind; }
 
     private:
+        /// @brief The error kind.
         Kind _kind;
     };
 
     /// @brief Concept for the connection handler.
-    template<class T, std::size_t BufSize>
-    concept ConnectionHandler = requires(T t, const sockaddr_in &addr, const std::array<std::byte, BufSize> &buf) {
-        { t.OnNew(addr) } -> std::same_as<std::vector<std::byte>>;
+    template<class T>
+    concept ConnectionHandler = requires(T t, const sockaddr_in &addr,
+                                         const std::vector<std::byte> &in_buf,
+                                         std::vector<std::byte> &out_buf) {
+        { t.OnNew(addr, out_buf) } -> std::same_as<bool>;
         { t.OnClose(addr) } -> std::same_as<void>;
-        { t.OnRead(addr, buf) } -> std::same_as<std::vector<std::byte>>;
+        { t.OnRead(addr, in_buf, out_buf) } -> std::same_as<bool>;
     };
 
     /**
-     * @brief Class for the server.
-     * @tparam MaxEvents Maximum number of events to handle.
-     * @tparam BufSize Size of the buffer for the read operation.
+     * TCP server. Accepts new connections and handles using a provided handler.
      */
-    template<std::size_t MaxEvents, std::size_t BufSize>
     class Server {
     public:
-
         /**
          * @brief Creates a new server.
          * @param port The port to listen on.
          */
-        [[nodiscard]] explicit Server(std::uint16_t port, std::size_t threads) : _port(port),
-                                                                                 _epoll_fd(epoll_create1(0)),
-                                                                                 _server_fd(socket(AF_INET, SOCK_STREAM,
-                                                                                                   0)),
-                                                                                 _thread_pool(threads) {
+        [[nodiscard]] Server(std::uint16_t port,
+                             std::size_t buf_size,
+                             int max_events,
+                             std::size_t threads) :
+                _port(port),
+                _epoll_fd(epoll_create1(0)),
+                _server_fd(socket(AF_INET, SOCK_STREAM, 0)),
+                _buf_size(buf_size),
+                _max_events(max_events),
+                _thread_pool(threads) {
             // Check if epoll was created successfully
             if (_epoll_fd == -1) {
                 throw Error("Failed to create epoll instance.", Error::Kind::EpollCreation);
@@ -130,7 +134,7 @@ namespace tcp {
          * @brief Runs the server.
          * @param handler The handler for the server.
          */
-        template<ConnectionHandler<BufSize> H>
+        template<ConnectionHandler H>
         [[noreturn]] void Run(H &handler) {
             // Listen for incoming connections
             if (listen(_server_fd, SOMAXCONN) == -1) {
@@ -144,12 +148,12 @@ namespace tcp {
             }
 
             // Set up an array to hold the events that are triggered
-            epoll_event events[MaxEvents];
+            std::vector<epoll_event> events(_max_events);
 
             // Event Loop
             while (true) {
                 // Wait for events on the sockets in the epoll instance
-                const int num_events = epoll_wait(_epoll_fd, events, MaxEvents, -1);
+                const int num_events = epoll_wait(_epoll_fd, events.data(), _max_events, -1);
                 if (num_events == -1) {
                     throw Error("Failed to wait for events.", Error::Kind::EpollWait);
                 }
@@ -167,8 +171,8 @@ namespace tcp {
         }
 
     private:
-        template<ConnectionHandler<BufSize> Handler>
-        void HandleNewConnection(Handler handler) {
+        template<ConnectionHandler H>
+        void HandleNewConnection(H handler) {
             // Accept the connection
             sockaddr_in client_addr{};
             socklen_t client_addr_len = sizeof(client_addr);
@@ -189,23 +193,29 @@ namespace tcp {
             }
 
             // Call the Handler
-            const std::vector<std::byte> bytes = handler.OnNew(client_addr);
-            if (!bytes.empty()) {
+            std::vector<std::byte> out_buf;
+            const bool keep_alive = handler.OnNew(client_addr, out_buf);
+            if (!out_buf.empty()) {
                 // Write the response to the client
-                if (write(client_fd, bytes.data(), bytes.size()) == -1) {
+                if (write(client_fd, out_buf.data(), out_buf.size()) == -1) {
                     throw Error("Failed to write to client socket.", Error::Kind::Write);
                 }
             }
 
+            if (!keep_alive) {
+                // Close the connection if the handler has requested it
+                CloseConnection(client_fd);
+                handler.OnClose(client_addr);
+            }
         }
 
-        template<ConnectionHandler<BufSize> Handler>
+        template<ConnectionHandler Handler>
         void HandleConnectionUpdate(int client_socket, Handler handler) {
             // Set up the buffer for the read operation
-            std::array<std::byte, BufSize> buf{};
+            std::vector<std::byte> in_buf(_buf_size);
 
             // Read the message
-            const ssize_t n = read(client_socket, buf.data(), buf.size());
+            const ssize_t n = read(client_socket, in_buf.data(), in_buf.size());
             if (n == -1) {
                 throw Error("Failed to read message.", Error::Kind::Read);
             }
@@ -231,13 +241,32 @@ namespace tcp {
                 const auto client_addr = GetClientAddress(client_socket);
 
                 // Call the Handler
-                const std::vector<std::byte> bytes = handler.OnRead(client_addr, buf);
-                if (!bytes.empty()) {
+                std::vector<std::byte> out_buf;
+                const bool keep_alive = handler.OnRead(client_addr, in_buf, out_buf);
+                if (!out_buf.empty()) {
                     // Write the response
-                    if (write(client_socket, bytes.data(), bytes.size()) == -1) {
+                    if (write(client_socket, out_buf.data(), out_buf.size()) == -1) {
                         throw Error("Failed to write response.", Error::Kind::Write);
                     }
                 }
+
+                if (!keep_alive) {
+                    // Close the connection if the handler has requested it
+                    CloseConnection(client_socket);
+                    handler.OnClose(client_addr);
+                }
+            }
+        }
+
+        void CloseConnection(int client_socket) const {
+            // Remove the client socket from the epoll instance
+            if (epoll_ctl(_epoll_fd, EPOLL_CTL_DEL, client_socket, nullptr) == -1) {
+                throw Error("Failed to remove client socket from epoll instance.", Error::Kind::EpollDelete);
+            }
+
+            // Close the socket
+            if (close(client_socket) == -1) {
+                throw Error("Failed to close client socket.", Error::Kind::Close);
             }
         }
 
@@ -258,12 +287,17 @@ namespace tcp {
             return client_addr;
         }
 
+
         /// @brief The epoll instance's file descriptor.
         int _epoll_fd;
         /// @brief The server socket's file descriptor.
         int _server_fd;
         /// @brief The port to listen on.
         std::uint16_t _port;
+        /// @brief The receive buffer size.
+        std::size_t _buf_size;
+        /// @brief The maximum number of events to wait for at a time.
+        int _max_events;
 
         /// @brief Thread pool for handling connections events.
         ThreadPool _thread_pool;
