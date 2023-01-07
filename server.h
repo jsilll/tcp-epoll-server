@@ -31,27 +31,25 @@ namespace tcp {
             EpollCreation,
             /// @brief Error while adding the socket to the epoll instance.
             EpollAdd,
-            /// @brief Error while deleting the socket from the epoll instance.
-            EpollDelete,
             /// @brief Error while waiting for events.
             EpollWait,
             /// @brief Error while accepting a new connection.
             Accept,
-            /// @brief Error while getting the address of a connection.
-            GetAddress,
             /// @brief Error while reading from a connection.
             Read,
             /// @brief Error while writing to a connection.
             Write,
             /// @brief Error while closing a connection.
             Close,
+            /// @brief Error while getting the address of a connection.
+            GetAddress,
         };
 
         /**
          * @brief Creates a new server error.
          * @param msg Error message.
          */
-        explicit Error(const std::string &msg, Kind kind) : std::runtime_error(msg), _kind(kind) {}
+        Error(const std::string &msg, Kind kind) : std::runtime_error(msg), _kind(kind) {}
 
         /**
          * @brief Returns the error kind.
@@ -64,18 +62,9 @@ namespace tcp {
         Kind _kind;
     };
 
-    /// @brief Concept for the connection handler.
-    template<class T>
-    concept ConnectionHandler = requires(T t, const sockaddr_in &addr,
-                                         const std::vector<std::byte> &in_buf,
-                                         std::vector<std::byte> &out_buf) {
-        { t.OnNew(addr, out_buf) } -> std::same_as<bool>;
-        { t.OnClose(addr) } -> std::same_as<void>;
-        { t.OnRead(addr, in_buf, out_buf) } -> std::same_as<bool>;
-    };
-
     /**
-     * TCP server. Accepts new connections and handles using a provided handler.
+     * TCP server. 
+     * Accepts new connections and handles using a provided handler.
      */
     class Server {
     public:
@@ -84,15 +73,20 @@ namespace tcp {
          * @param port The port to listen on.
          */
         [[nodiscard]] Server(std::uint16_t port,
+                             std::size_t threads,
                              std::size_t buf_size,
-                             int max_events,
-                             std::size_t threads) :
+                             int max_events) :
                 _port(port),
-                _epoll_fd(epoll_create1(0)),
-                _server_fd(socket(AF_INET, SOCK_STREAM, 0)),
+                _thread_pool(threads),
                 _buf_size(buf_size),
                 _max_events(max_events),
-                _thread_pool(threads) {
+                _epoll_fd(epoll_create1(0)),
+                _server_fd(socket(AF_INET, SOCK_STREAM, 0)) {
+            // Check if the max_events is valid.
+            if (max_events <= 0) {
+                throw Error("Invalid max events.", Error::Kind::EpollCreation);
+            }
+
             // Check if epoll was created successfully
             if (_epoll_fd == -1) {
                 throw Error("Failed to create epoll instance.", Error::Kind::EpollCreation);
@@ -104,9 +98,7 @@ namespace tcp {
             }
 
             // Make the server socket non-blocking
-            if (MakeSocketNonBlocking(_server_fd) == -1) {
-                throw Error("Failed to make server socket non-blocking.", Error::Kind::SocketCreation);
-            }
+            MakeSocketNonBlocking(_server_fd);
 
             // Set socket options
             const int opt = 1;
@@ -115,8 +107,7 @@ namespace tcp {
             }
 
             // Bind the socket to an address and port
-            sockaddr_in server_addr{.sin_family = AF_INET, .sin_port = htons(
-                    _port), .sin_addr = {.s_addr = INADDR_ANY}};
+            sockaddr_in server_addr{.sin_family = AF_INET, .sin_port = htons(_port), .sin_addr = {.s_addr = INADDR_ANY}};
             if (bind(_server_fd, reinterpret_cast<const sockaddr *>(&server_addr), sizeof(server_addr)) == -1) {
                 throw Error("Failed to bind server socket.", Error::Kind::SocketBinding);
             }
@@ -126,15 +117,16 @@ namespace tcp {
          * @brief Closes the sever's socket and epoll instance.
          */
         ~Server() noexcept {
-            close(_server_fd);
             close(_epoll_fd);
+            close(_server_fd);
         }
 
         /**
          * @brief Runs the server.
+         * @tparam H The connection handler type.
          * @param handler The handler for the server.
          */
-        template<ConnectionHandler H>
+        template<typename H>
         [[noreturn]] void Run(H &handler) {
             // Listen for incoming connections
             if (listen(_server_fd, SOMAXCONN) == -1) {
@@ -142,10 +134,7 @@ namespace tcp {
             }
 
             // Add the server socket to the epoll instance
-            epoll_event event{.events = EPOLLIN, .data = {.fd = _server_fd}};
-            if (epoll_ctl(_epoll_fd, EPOLL_CTL_ADD, _server_fd, &event) == -1) {
-                throw Error("Failed to add server socket to epoll instance.", Error::Kind::EpollAdd);
-            }
+            AddToEpoll(_server_fd);
 
             // Set up an array to hold the events that are triggered
             std::vector<epoll_event> events(_max_events);
@@ -154,150 +143,187 @@ namespace tcp {
             while (true) {
                 // Wait for events on the sockets in the epoll instance
                 const int num_events = epoll_wait(_epoll_fd, events.data(), _max_events, -1);
+                // Check if there was an error while waiting for events
                 if (num_events == -1) {
                     throw Error("Failed to wait for events.", Error::Kind::EpollWait);
                 }
 
                 // Process each event
                 for (int i = 0; i < num_events; ++i) {
-                    if (events[i].data.fd == _server_fd) { // New connection
+                    if (events[i].data.fd == _server_fd) { 
+                        // New connection event
                         _thread_pool.Push([this, &handler] { HandleNewConnection(handler); });
-                    } else { // Existing connection
-                        _thread_pool.Push(
-                                [this, &handler, fd = events[i].data.fd] { HandleConnectionUpdate(fd, handler); });
+                    } else { 
+                        // Event on existing connection
+                        _thread_pool.Push([this, &handler, fd = events[i].data.fd] { HandleConnectionUpdate(fd, handler); });
                     }
                 }
             }
         }
 
     private:
-        template<ConnectionHandler H>
-        void HandleNewConnection(H handler) {
+
+        // -- Threaded Functions --
+
+        template<typename H>
+        void HandleNewConnection(H &handler) {
             // Accept the connection
             sockaddr_in client_addr{};
             socklen_t client_addr_len = sizeof(client_addr);
-            const int client_fd = accept(_server_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_addr_len);
-            if (client_fd == -1) {
-                throw Error("Failed to accept a new connection.", Error::Kind::Accept);
+            const int client_socket = accept(_server_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_addr_len);
+
+            // Check if the connection was accepted successfully
+            if (client_socket == -1) {
+                return handler.OnError(client_addr, {"Failed to accept a new connection", Error::Kind::Accept});
             }
 
-            // Make the client socket non-blocking
-            if (MakeSocketNonBlocking(client_fd) == -1) {
-                throw Error("Failed to make client socket non-blocking.", Error::Kind::Accept);
-            }
+            // Make the client socket non-blocking and add it to the epoll instance
+            try {
+                MakeSocketNonBlocking(client_socket);
+                AddToEpoll(client_socket);
+            } catch (const Error &e) {
+                // Close the connection
+                close(client_socket);
 
-            // Add the client socket to the epoll instance
-            epoll_event client_event = {.events = EPOLLIN, .data = {.fd = client_fd}};
-            if (epoll_ctl(_epoll_fd, EPOLL_CTL_ADD, client_fd, &client_event) == -1) {
-                throw Error("Failed to add client socket to epoll instance.", Error::Kind::EpollAdd);
+                // Call the Handler
+                return handler.OnError(client_addr, e);
             }
 
             // Call the Handler
             std::vector<std::byte> out_buf;
             const bool keep_alive = handler.OnNew(client_addr, out_buf);
-            if (!out_buf.empty()) {
-                // Write the response to the client
-                if (write(client_fd, out_buf.data(), out_buf.size()) == -1) {
-                    throw Error("Failed to write to client socket.", Error::Kind::Write);
-                }
+
+            // Write the response to the client
+            try {
+                Write(client_socket, out_buf);
+            } catch (const Error &e) {
+                // Close the connection
+                close(client_socket);
+
+                // Call the Handler
+                return handler.OnError(client_addr, e);
             }
 
+            // Close the connection if the handler has requested it
             if (!keep_alive) {
-                // Close the connection if the handler has requested it
-                CloseConnection(client_fd);
-                handler.OnClose(client_addr);
+                // Close the connection
+                close(client_socket);
             }
         }
 
-        template<ConnectionHandler Handler>
-        void HandleConnectionUpdate(int client_socket, Handler handler) {
-            // Set up the buffer for the read operation
-            std::vector<std::byte> in_buf(_buf_size);
-
+        template<typename Handler>
+        void HandleConnectionUpdate(const int client_socket, Handler &handler) {
             // Read the message
+            std::vector<std::byte> in_buf(_buf_size);
             const ssize_t n = read(client_socket, in_buf.data(), in_buf.size());
-            if (n == -1) {
-                throw Error("Failed to read message.", Error::Kind::Read);
-            }
 
-            if (n == 0) { // If the read returns 0, it means the client has closed the connection
+            if (n == -1) { 
+                // Error
+
                 // Get the client address
                 const auto client_addr = GetClientAddress(client_socket);
 
-                // Remove the client socket from the epoll instance
-                if (epoll_ctl(_epoll_fd, EPOLL_CTL_DEL, client_socket, nullptr) == -1) {
-                    throw Error("Failed to remove client socket from epoll instance.", Error::Kind::EpollDelete);
-                }
+                // Close the connection 
+                close(client_socket);
 
-                // Close the socket
-                if (close(client_socket) == -1) {
-                    throw Error("Failed to close client socket.", Error::Kind::Close);
-                }
+                // Call the Handler
+                handler.OnError(client_addr, {"Failed to read from client.", Error::Kind::Read});
+            } else if (n == 0) { 
+                // The client has closed the connection
+                
+                // Get the client address
+                const auto client_addr = GetClientAddress(client_socket);
+                
+                // Close the connection
+                close(client_socket);
 
                 // Call the Handler
                 handler.OnClose(client_addr);
             } else {
+                // The client has sent a message
+                
                 // Get the client address
                 const auto client_addr = GetClientAddress(client_socket);
-
-                // Call the Handler
+                
+                // Set up the buffer for the write operation
                 std::vector<std::byte> out_buf;
+                
+                // Call the Handler
                 const bool keep_alive = handler.OnRead(client_addr, in_buf, out_buf);
-                if (!out_buf.empty()) {
-                    // Write the response
-                    if (write(client_socket, out_buf.data(), out_buf.size()) == -1) {
-                        throw Error("Failed to write response.", Error::Kind::Write);
-                    }
-                }
+                
+                // Write the response to the client
+                try {
+                    // Write the response to the client
+                    Write(client_socket, out_buf);
+                } catch (const Error &e) {
+                    // Close the connection
+                    close(client_socket);
 
+                    // Call the Handler
+                    return handler.OnError(client_addr, e);
+                }
+                
+                // Close the connection if the handler has requested it
                 if (!keep_alive) {
-                    // Close the connection if the handler has requested it
-                    CloseConnection(client_socket);
-                    handler.OnClose(client_addr);
+                    // Close the connection
+                    close(client_socket);
                 }
             }
         }
 
-        void CloseConnection(int client_socket) const {
-            // Remove the client socket from the epoll instance
-            if (epoll_ctl(_epoll_fd, EPOLL_CTL_DEL, client_socket, nullptr) == -1) {
-                throw Error("Failed to remove client socket from epoll instance.", Error::Kind::EpollDelete);
-            }
+        // -- Helper Methods --
 
-            // Close the socket
-            if (close(client_socket) == -1) {
-                throw Error("Failed to close client socket.", Error::Kind::Close);
+        void AddToEpoll(const int client_socket) const {
+            // Add the client socket to the epoll instance
+            epoll_event client_event = {.events = EPOLLIN, .data = {.fd = client_socket}};
+            if (epoll_ctl(_epoll_fd, EPOLL_CTL_ADD, client_socket, &client_event) == -1) {
+                throw Error("Failed to add socket to epoll instance.", Error::Kind::EpollAdd);
             }
         }
 
-        static int MakeSocketNonBlocking(int fd) {
+        // -- Helper Static Methods --
+
+        static void Write(int client_socket, const std::vector<std::byte> &out_buf) {
+            if (!out_buf.empty()) {
+                if (write(client_socket, out_buf.data(), out_buf.size()) == -1) {
+                    throw Error("Failed to write response.", Error::Kind::Write);
+                }
+            }
+        }
+
+        static void MakeSocketNonBlocking(int fd) {
             const int flags = fcntl(fd, F_GETFL, 0);
             if (flags == -1) {
                 throw Error("Failed to get socket flags.", Error::Kind::SocketCreation);
             }
-            return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+            if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+                throw Error("Failed to set socket flags.", Error::Kind::SocketCreation);
+            }
         }
 
         static sockaddr_in GetClientAddress(int client_fd) {
             sockaddr_in client_addr{};
             socklen_t client_addr_len = sizeof(client_addr);
             if (getpeername(client_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_addr_len) == -1) {
-                throw Error("Failed to get client address.", Error::Kind::GetAddress);
+                return {}; // Ignore errors
             }
             return client_addr;
         }
 
+        // -- Member Variables --
 
-        /// @brief The epoll instance's file descriptor.
-        int _epoll_fd;
-        /// @brief The server socket's file descriptor.
-        int _server_fd;
         /// @brief The port to listen on.
         std::uint16_t _port;
         /// @brief The receive buffer size.
         std::size_t _buf_size;
         /// @brief The maximum number of events to wait for at a time.
         int _max_events;
+
+        /// @brief The epoll instance's file descriptor.
+        int _epoll_fd;
+        /// @brief The server socket's file descriptor.
+        int _server_fd;
 
         /// @brief Thread pool for handling connections events.
         ThreadPool _thread_pool;

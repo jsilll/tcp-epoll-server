@@ -35,19 +35,20 @@ def start_client(port : int):
 
     print(f"Connection took {end_time - start_time} seconds")
 
-def main():
+if __name__ == "__main__":
+    # Parse the command line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--connections", type=int, default=5)
+    parser.add_argument("--connections", type=int, default=1)
     args = parser.parse_args()
 
-    processes = list()
-    for i in range(args.connections):
-        p = Process(target=start_client, args=(args.port,))
+    # Initialize the processes
+    processes = [ Process(target=start_client, args=(args.port,)) for _ in range(args.connections)]
+
+    # Start the processes    
+    for p in processes:
         p.start()
 
-    for p, start_time in processes:
+    # Wait for the processes to finish
+    for start_time in processes:
         p.join()
-
-if __name__ == "__main__":
-    main()
