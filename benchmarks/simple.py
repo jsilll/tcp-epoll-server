@@ -28,7 +28,7 @@ def start_client(port: int):
     # close the connection
     sock.close()
 
-    print(f"Connection took {end_time - start_time} seconds")
+    print(f"Response latency: {end_time - start_time}")
 
 
 if __name__ == "__main__":

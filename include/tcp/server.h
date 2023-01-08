@@ -166,6 +166,19 @@ namespace tcp {
                             continue; // Ignore the connection
                         }
 
+                        // Set Timeout for receive operation on the client socket 
+                        timeval timeout{.tv_sec = 15, .tv_usec = 0}; // TODO: parameterize this value
+                        if (setsockopt (client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == -1) {
+                            close(client_fd);
+                            continue; // Ignore the connection
+                        }
+
+                        // Set Timeout for write operation on the client socket 
+                        if (setsockopt (client_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == -1) {
+                            close(client_fd);
+                            continue; // Ignore the connection
+                        }
+
                         // Add the server socket to the epoll instance
                         epoll_event client_event = {.events = EPOLLIN, .data = {.fd = client_fd}};
                         if (epoll_ctl(_epoll_fd, EPOLL_CTL_ADD, client_fd, &client_event) == -1) {
