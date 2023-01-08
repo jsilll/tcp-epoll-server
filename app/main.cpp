@@ -11,7 +11,7 @@ int main() {
     try {
         EchoHandler handler;
         tcp::Server server(PORT, THREADS, BUFFER_SIZE, EVENTS);
-        std::cout << "Starting started on port: " << PORT << std::endl;
+        std::cout << "Starting server on port: " << PORT << std::endl;
         server.Run(handler);
     } catch (const tcp::Error &e) {
         std::cerr << e.kind() << ": " << e.what() << std::endl;
