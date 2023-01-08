@@ -42,6 +42,7 @@ namespace tcp {
         /**
          * @brief Creates a new server error.
          * @param msg Error message.
+         * @param kind Error kind.
          */
         Error(const std::string &msg, Kind kind) : std::runtime_error(msg), _kind(kind) {}
 
@@ -65,17 +66,20 @@ namespace tcp {
         /**
          * @brief Creates a new server.
          * @param port The port to listen on.
+         * @param threads The number of threads to use.
+         * @param buf_size The buffer size for the receive operation in each connection.
+         * @param max_events The maximum number of events to wait for.
          */
         [[nodiscard]] Server(std::uint16_t port,
                              std::size_t threads,
                              std::size_t buf_size,
                              int max_events) :
                 _port(port),
-                _thread_pool(threads),
                 _buf_size(buf_size),
                 _max_events(max_events),
                 _epoll_fd(epoll_create1(0)),
-                _server_fd(socket(AF_INET, SOCK_STREAM, 0)) {
+                _server_fd(socket(AF_INET, SOCK_STREAM, 0)),
+                _thread_pool(threads) {
             // Check if the max_events is valid.
             if (max_events <= 0) {
                 throw Error("Invalid max events.", Error::Kind::EpollCreation);
@@ -169,7 +173,7 @@ namespace tcp {
                             continue; // Ignore the connection
                         }
                         
-                        _thread_pool.Push([this, &handler, client_fd] { HandleNewConnection(handler, client_fd); });
+                        _thread_pool.Push([&handler, client_fd] { HandleNewConnection(handler, client_fd); });
                     } else { 
                         // Event on existing connection
 
@@ -188,7 +192,7 @@ namespace tcp {
                             // Close the connection 
                             close(client_fd);
 
-                            _thread_pool.Push([this, &handler, client_addr] { handler.OnError(client_addr, {"Failed to read from a client.", Error::Kind::Read}); });
+                            _thread_pool.Push([&handler, client_addr] { handler.OnError(client_addr, {"Failed to read from a client.", Error::Kind::Read}); });
                         } else if (n == 0) {
                             // Get the client address
                             const auto client_addr = GetClientAddress(client_fd);
@@ -196,9 +200,9 @@ namespace tcp {
                             // Close the connection
                             close(client_fd);
 
-                            _thread_pool.Push([this, &handler, client_addr] { handler.OnClose(client_addr); });
+                            _thread_pool.Push([&handler, client_addr] { handler.OnClose(client_addr); });
                         } else {
-                            _thread_pool.Push([this, &handler, client_fd, in_buf = std::move(in_buf)] { HandleRead(handler, client_fd, in_buf); });
+                            _thread_pool.Push([&handler, client_fd, in_buf = std::move(in_buf)] { HandleRead(handler, client_fd, in_buf); });
                         }
                     }
                 }
@@ -210,7 +214,7 @@ namespace tcp {
         // -- Threaded Functions --
 
         template<typename Handler>
-        void HandleNewConnection(Handler &handler, const int client_fd) {
+        static void HandleNewConnection(Handler &handler, const int client_fd) {
             // Get the client's address
             const auto client_addr = GetClientAddress(client_fd);
 
@@ -237,7 +241,7 @@ namespace tcp {
         }
 
         template<typename Handler>
-        void HandleRead(Handler &handler, const int client_fd, const std::vector<std::byte> &in_buf) {
+        static void HandleRead(Handler &handler, const int client_fd, const std::vector<std::byte> &in_buf) {
             // Get the client address
             const auto client_addr = GetClientAddress(client_fd);
                 
@@ -280,7 +284,7 @@ namespace tcp {
             sockaddr_in client_addr{};
             socklen_t client_addr_len = sizeof(client_addr);
             if (getpeername(client_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_addr_len) == -1) {
-                return {}; // Ignore errors
+                return {}; // Ignore errors, TODO: maybe fix this
             }
             return client_addr;
         }

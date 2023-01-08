@@ -4,15 +4,16 @@ import socket
 import argparse
 from multiprocessing import Process
 
-
 def start_client(port: int):
     # establish tcp connection
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect(("localhost", port))
+
     # receive the welcome message
     sock.recv(1024)
     # stall for random amount of time
     time.sleep(random.random() * 5)
+
     # record the starting time
     start_time = time.time()
     # send a message
@@ -21,6 +22,7 @@ def start_client(port: int):
     sock.recv(1024)
     # record the end time
     end_time = time.time()
+
     # stall for random amount of time
     time.sleep(random.random() * 5)
     # close the connection
