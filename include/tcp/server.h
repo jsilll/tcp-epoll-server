@@ -58,9 +58,10 @@ namespace tcp {
     };
 
     /**
-     * TCP server. 
-     * Accepts new connections and handles using a provided handler.
+     * @brief TCP server. Accepts new connections and handles using a provided handler.
+     * @tparam Handler The handler type.
      */
+    template <typename Handler>
     class Server {
     public:
         /**
@@ -118,10 +119,8 @@ namespace tcp {
 
         /**
          * @brief Runs the server.
-         * @tparam H The connection handler type.
          * @param handler The handler for the server.
          */
-        template<typename Handler>
         [[noreturn]] void Run(Handler &handler) {
             // Listen for incoming connections
             if (listen(_server_fd, SOMAXCONN) == -1) {
@@ -163,19 +162,6 @@ namespace tcp {
 
                         // Check if the connection was accepted successfully
                         if (client_fd == -1) {
-                            continue; // Ignore the connection
-                        }
-
-                        // Set Timeout for receive operation on the client socket 
-                        timeval timeout{.tv_sec = 15, .tv_usec = 0}; // TODO: parameterize this value
-                        if (setsockopt (client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == -1) {
-                            close(client_fd);
-                            continue; // Ignore the connection
-                        }
-
-                        // Set Timeout for write operation on the client socket 
-                        if (setsockopt (client_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == -1) {
-                            close(client_fd);
                             continue; // Ignore the connection
                         }
 
@@ -226,7 +212,6 @@ namespace tcp {
 
         // -- Threaded Functions --
 
-        template<typename Handler>
         static void HandleNewConnection(Handler &handler, const int client_fd) {
             // Get the client's address
             const auto client_addr = GetClientAddress(client_fd);
@@ -253,8 +238,7 @@ namespace tcp {
             }
         }
 
-        template<typename Handler>
-        static void HandleRead(Handler &handler, const int client_fd, const std::vector<std::byte> &in_buf) {
+        static void HandleRead(Handler &handler, const int client_fd, const std::vector<std::byte> &in_buf) noexcept {
             // Get the client address
             const auto client_addr = GetClientAddress(client_fd);
                 
@@ -293,7 +277,7 @@ namespace tcp {
             }
         }
 
-        static sockaddr_in GetClientAddress(int client_fd) {
+        static sockaddr_in GetClientAddress(int client_fd) noexcept {
             sockaddr_in client_addr{};
             socklen_t client_addr_len = sizeof(client_addr);
             if (getpeername(client_fd, reinterpret_cast<sockaddr *>(&client_addr), &client_addr_len) == -1) {

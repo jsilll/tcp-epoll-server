@@ -40,7 +40,7 @@ public:
         }
     }
 
-    ~ThreadPool() {
+    ~ThreadPool() noexcept {
         Stop();
     }
 

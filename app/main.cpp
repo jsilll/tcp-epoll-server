@@ -10,7 +10,7 @@
 int main() {
     try {
         EchoHandler handler;
-        tcp::Server server(PORT, THREADS, BUFFER_SIZE, EVENTS);
+        tcp::Server<EchoHandler> server(PORT, THREADS, BUFFER_SIZE, EVENTS);
         std::cout << "Starting server on port: " << PORT << std::endl;
         server.Run(handler);
     } catch (const tcp::Error &e) {
