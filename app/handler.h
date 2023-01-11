@@ -33,9 +33,7 @@ public:
      * @param addr The address of the connection that sent the message.
      * @param buf The message.
      */
-    [[nodiscard]] static bool OnRead([[maybe_unused]] const sockaddr_in &addr,
-                                     const std::vector<std::byte> &in_buf,
-                                     std::vector<std::byte> &out_buf) noexcept {
+    [[nodiscard]] static bool OnRead([[maybe_unused]] const sockaddr_in &addr, const std::vector<std::byte> &in_buf, std::vector<std::byte> &out_buf) noexcept {
         const std::size_t len = std::strlen(reinterpret_cast<const char *>(in_buf.data()));
         out_buf.resize(len);
         std::copy(in_buf.begin(), in_buf.begin() + static_cast<long>(len), out_buf.begin());

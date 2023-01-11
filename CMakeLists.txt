@@ -35,7 +35,7 @@ if (CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 endif()
 
 # -- Library --
-add_library(tcp INTERFACE)
+add_library(tcp INTERFACE include/tcp/utils.h)
 target_include_directories(tcp INTERFACE include)
 
 # -- Executable --
